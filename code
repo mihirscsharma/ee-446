@@ -1,0 +1,82 @@
+#include <Arduino_BMI270_BMM150.h>
+#include <Arduino_APDS9960.h>
+#include <PDM.h>
+
+// --- Threshold Configuration ---
+const int THRESHOLD_MIC   = 100;   // Filters background noise
+const int THRESHOLD_CLEAR = 150;   // Brightness limit
+const float THRESHOLD_MOT = 0.15;  // Deviation from 1.0g
+const int THRESHOLD_PROX  = 50;    // IR proximity detection
+
+// --- Audio Buffer ---
+short sampleBuffer[256];
+volatile int samplesRead = 0;
+
+void onPDMdata() {
+  int bytesAvailable = PDM.available();
+  PDM.read(sampleBuffer, bytesAvailable);
+  samplesRead = bytesAvailable / 2;
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial);
+
+  if (!IMU.begin())  while (1);
+  if (!APDS.begin()) while (1);
+  
+  PDM.onReceive(onPDMdata);
+  if (!PDM.begin(1, 16000)) while (1);
+}
+
+void loop() {
+  // 1. DATA ACQUISITION
+  int micValue = 0;
+  if (samplesRead) {
+    long sum = 0;
+    for (int i = 0; i < samplesRead; i++) sum += abs(sampleBuffer[i]);
+    micValue = sum / samplesRead;
+    samplesRead = 0;
+  }
+
+  int r, g, b, clearValue;
+  APDS.readColor(r, g, b, clearValue);
+  int proxValue = APDS.readProximity();
+
+  float ax, ay, az;
+  IMU.readAcceleration(ax, ay, az);
+  float motionValue = abs(sqrt(ax*ax + ay*ay + az*az) - 1.0);
+
+  // 2. BINARY DECISIONS
+  bool sound  = (micValue > THRESHOLD_MIC);
+  bool dark   = (clearValue < THRESHOLD_CLEAR);
+  bool moving = (motionValue > THRESHOLD_MOT);
+  bool near   = (proxValue > THRESHOLD_PROX);
+
+  // 3. RULE-BASED INFERENCE (Strict Assignment Logic)
+  String state = "UNKNOWN";
+  if (!sound && !dark && !moving && !near) {
+    state = "QUIET_BRIGHT_STEADY_FAR";
+  } else if (sound && !dark && !moving && !near) {
+    state = "NOISY_BRIGHT_STEADY_FAR";
+  } else if (!sound && dark && !moving && near) {
+    state = "QUIET_DARK_STEADY_NEAR";
+  } else if (sound && !dark && moving && near) {
+    state = "NOISY_BRIGHT_MOVING_NEAR";
+  }
+
+  // 4. SERIAL OUTPUT
+  Serial.print("raw,mic=");    Serial.print(micValue);
+  Serial.print(",clear=");      Serial.print(clearValue);
+  Serial.print(",motion=");     Serial.print(motionValue, 3);
+  Serial.print(",prox=");       Serial.println(proxValue);
+
+  Serial.print("flags,sound="); Serial.print(sound);
+  Serial.print(",dark=");       Serial.print(dark);
+  Serial.print(",moving=");     Serial.print(moving);
+  Serial.print(",near=");       Serial.println(near);
+
+  Serial.print("state,");       Serial.println(state);
+
+  delay(500);
+}
